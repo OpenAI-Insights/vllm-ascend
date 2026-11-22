@@ -99,8 +99,18 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        token_cap: int | None = None,
+    ) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)
+        if token_cap is not None:
+            prompt_token_len = min(
+                prompt_token_len,
+                self._floor_to_cache_transfer_granularity(token_cap),
+            )
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):

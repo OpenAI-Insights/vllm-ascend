@@ -293,6 +293,16 @@ class BaseKVPoolScheduler(ABC):
                     num_computed_tokens,
                     num_external_hit_tokens - self.lcm_block_size,
                 )
+                if self.cache_coordinator is not None and num_external_hit_tokens > num_computed_tokens:
+                    # A recurrent state or sliding-window tail at the original
+                    # hit does not prove that the shorter prefix is readable.
+                    # Resolve a reachable hit within the draft replay boundary.
+                    # Preserve store_skip_tokens: the original keys already
+                    # exist and must not be overwritten during replay.
+                    verified_hit = self._lookup_external_hit_tokens(
+                        request, num_computed_tokens, token_cap=num_external_hit_tokens
+                    )
+                    num_external_hit_tokens = max(num_computed_tokens, verified_hit or 0)
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
         if len(self.cacheable_group_ids) != len(self.original_block_size):
@@ -349,8 +359,10 @@ class BaseKVPoolScheduler(ABC):
         return None
 
     @abstractmethod
-    def _lookup_external_hit_tokens(self, request: "Request", num_computed_tokens: int) -> int | None:
-        """Return the external cache hit using the selected transfer mode."""
+    def _lookup_external_hit_tokens(
+        self, request: "Request", num_computed_tokens: int, token_cap: int | None = None
+    ) -> int | None:
+        """Return a reachable external prefix no longer than token_cap, if set."""
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         """
@@ -821,7 +833,9 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         """Keep Mamba source blocks alive until bulk save completes."""
         self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
 
-    def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+    def _lookup_external_hit_tokens(
+        self, request: Request, num_computed_tokens: int, token_cap: int | None = None
+    ) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)
         if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
@@ -832,6 +846,8 @@ class KVPoolScheduler(BaseKVPoolScheduler):
                 if self._discard_partial_chunks
                 else prompt_token_len
             )
+        if token_cap is not None:
+            token_len = min(token_len, self._floor_to_cache_transfer_granularity(token_cap))
         if token_len < self.cache_transfer_granularity or num_computed_tokens >= token_len:
             return None
         if self.client is None or self.client.closed:
